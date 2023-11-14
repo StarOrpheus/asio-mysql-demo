@@ -1,39 +1,44 @@
-#include <vector>
 #include <iostream>
 #include <string_view>
+#include <vector>
 
-#include <boost/mysql.hpp>
 #include <boost/asio.hpp>
 #include <boost/asio/experimental/as_single.hpp>
+#include <boost/mysql.hpp>
 
 using namespace std::literals;
 
 using boost::asio::experimental::as_single_t;
 using boost::asio::use_awaitable_t;
 using boost::asio::ip::tcp;
+
 using default_token = as_single_t<use_awaitable_t<>>;
 using tcp_resolver = default_token::as_default_on_t<tcp::resolver>;
 using mysql_connection = boost::mysql::tcp_ssl_connection;
+using io_context = boost::asio::io_context;
+using ssl_context = boost::asio::ssl::context;
+
 
 template <class T> using awaitable = boost::asio::awaitable<T>;
 
-constexpr auto tuple_awaitable = boost::asio::as_tuple(
-    boost::asio::use_awaitable);
+constexpr auto TupleAwaitable = as_tuple(boost::asio::use_awaitable);
 
 constexpr auto USERNAME = "root"sv;
 constexpr auto PASSWORD = "Secret"sv;
 constexpr auto HOST = "127.0.0.1"sv;
 
-auto withDbConnected(boost::asio::io_context &ctx,
-                     boost::asio::ssl::context &ssl_ctx,
+namespace {
+
+auto withDbConnected(io_context &Ctx,
+                     ssl_context &SslCtx,
                      std::function<awaitable<void>(mysql_connection &)> F) ->
   awaitable<void> {
-  boost::system::error_code ec;
-  boost::mysql::diagnostics diag;
+  boost::system::error_code Ec;
+  boost::mysql::diagnostics Diag;
 
   // Resolve the hostname to get a collection of endpoints
-  tcp_resolver resolver(ctx.get_executor());
-  auto [resolveError, endpoints] = co_await resolver.async_resolve(
+  tcp_resolver Resolver(Ctx.get_executor());
+  auto [resolveError, endpoints] = co_await Resolver.async_resolve(
       HOST, boost::mysql::default_port_string);
   if (resolveError) {
     std::cerr << "Host resolve failed: " << resolveError.what() << std::endl;
@@ -41,10 +46,10 @@ auto withDbConnected(boost::asio::io_context &ctx,
   }
 
   // Represents a connection to the MySQL server.
-  mysql_connection conn(ctx.get_executor(), ssl_ctx);
+  mysql_connection Conn(Ctx.get_executor(), SslCtx);
 
   // The username, password and database to use
-  boost::mysql::handshake_params params(
+  boost::mysql::handshake_params Params(
       USERNAME,
       PASSWORD,
       "CompanyDB", // database
@@ -52,65 +57,66 @@ auto withDbConnected(boost::asio::io_context &ctx,
       boost::mysql::ssl_mode::enable
       );
 
-  std::tie(ec) = co_await conn.async_connect(*endpoints.begin(), params, diag,
-                                             tuple_awaitable);
-  throw_on_error(ec, diag);
+  std::tie(Ec) = co_await Conn.async_connect(*endpoints.begin(), Params, Diag,
+                                             TupleAwaitable);
+  throw_on_error(Ec, Diag);
 
-  co_await F(conn);
+  co_await F(Conn);
 
   std::cerr << "!!!DATABASE CLOSED!!!" << std::endl;
 
-  co_await conn.async_close(default_token{});
+  co_await Conn.async_close(default_token{});
 }
 
-auto print_employee(boost::mysql::row_view employee) -> void {
-  std::cout << "Employee '" << employee.at(0) << " " // first_name (string)
-      << employee.at(1) << "' earns "                // last_name  (string)
-      << employee.at(2) << " dollars yearly\n";      // salary     (double)
+auto printEmployee(boost::mysql::row_view Employee) -> void {
+  std::cout << "Employee '" << Employee.at(0) << " " // first_name (string)
+      << Employee.at(1) << "' earns "                // last_name  (string)
+      << Employee.at(2) << " dollars yearly\n";      // salary     (double)
 }
 
-auto db_actions(mysql_connection &conn) -> awaitable<void> {
-  std::error_code ec;
-  boost::mysql::statement stmt;
-  boost::mysql::diagnostics diag;
+auto dbActions(mysql_connection &Conn) -> awaitable<void> {
+  std::error_code Ec;
+  boost::mysql::statement Stmt;
+  boost::mysql::diagnostics Diag;
 
-  std::tie(ec, stmt) = co_await conn.
+  std::tie(Ec, Stmt) = co_await Conn.
       async_prepare_statement(
           "SELECT first_name, last_name, salary FROM employees",
-          diag,
-          tuple_awaitable
+          Diag,
+          TupleAwaitable
           );
-  boost::mysql::throw_on_error(ec, diag);
+  throw_on_error(Ec, Diag);
 
-  boost::mysql::results result;
-  std::tie(ec) = co_await conn.async_execute(stmt.bind(), result, diag,
-                                             tuple_awaitable);
-  boost::mysql::throw_on_error(ec, diag);
+  boost::mysql::results Result;
+  std::tie(Ec) = co_await Conn.async_execute(Stmt.bind(), Result, Diag,
+                                             TupleAwaitable);
+  throw_on_error(Ec, Diag);
 
   // Print all employees
-  for (boost::mysql::row_view employee : result.rows()) {
-    print_employee(employee);
+  for (const boost::mysql::row_view Employee : Result.rows()) {
+    printEmployee(Employee);
   }
 }
 
-auto main_impl(boost::asio::io_context &ctx,
-               boost::asio::ssl::context &ssl_ctx) -> awaitable<void> {
-  co_await withDbConnected(ctx, ssl_ctx, [](mysql_connection &conn) {
-    return db_actions(conn);
+auto mainImpl(io_context &Ctx,
+              ssl_context &SslContext) -> awaitable<void> {
+  co_await withDbConnected(Ctx, SslContext, [](mysql_connection &conn) {
+    return dbActions(conn);
   });
 }
+} // namespace
 
 auto main() -> int {
 
   // The execution context, required to run I/O operations.
-  boost::asio::io_context ctx;
+  io_context Ctx;
 
   // The SSL context, required to establish TLS connections.
   // The default SSL options are good enough for us at this point.
-  boost::asio::ssl::context ssl_ctx(boost::asio::ssl::context::tls_client);
+  ssl_context SslContext(ssl_context::tls_client);
 
-  auto MainImpl = [&ctx, &ssl_ctx] {
-    return main_impl(ctx, ssl_ctx);
+  auto MainImpl = [&Ctx, &SslContext] {
+    return mainImpl(Ctx, SslContext);
   };
 
   auto ErrorHandler = [](std::exception_ptr Ptr) {
@@ -119,10 +125,10 @@ auto main() -> int {
     }
   };
 
-  boost::asio::co_spawn(ctx.get_executor(), MainImpl, ErrorHandler);
+  co_spawn(Ctx.get_executor(), MainImpl, ErrorHandler);
 
   try {
-    ctx.run();
+    Ctx.run();
   } catch (const boost::mysql::error_with_diagnostics &Err) {
     std::cerr << "Error: " << Err.what() << '\n'
         << "Server diagnostics: "
